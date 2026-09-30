@@ -93,6 +93,9 @@ flutter:
   assets:
     - assets/logo.png
     - assets/icons/
+    - assets/data/           # kalau ayat lu di sini
+    - assets/quran/          # atau di sini
+    - assets/json/ 
 flutter_native_splash:
   color: "#0D4A42"
   image: assets/logo.png
