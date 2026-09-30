@@ -1,10 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:async';
 import 'package:google_fonts/google_fonts.dart';
-import 'data/quran_offline_data.dart';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
+import '../services/quran_service.dart';
 
 const Map<int, int> surahStartPage = {
   1: 1, 2: 2, 3: 50, 4: 77, 5: 106, 6: 128, 7: 151, 8: 177, 9: 187, 10: 208,
@@ -23,7 +19,7 @@ const Map<int, int> surahStartPage = {
 
 int getSurahEndPage(int no) {
   if (no >= 114) return 604;
-  return (surahStartPage[no + 1] ?? 604) - 1;
+  return (surahStartPage[no + 1]?? 604) - 1;
 }
 
 class SurahDetailPage extends StatefulWidget {
@@ -31,7 +27,13 @@ class SurahDetailPage extends StatefulWidget {
   final String surahName;
   final String surahArab;
   final int? initialAyat;
-  const SurahDetailPage({super.key, required this.surahNumber, required this.surahName, required this.surahArab, this.initialAyat});
+  const SurahDetailPage({
+    super.key,
+    required this.surahNumber,
+    required this.surahName,
+    required this.surahArab,
+    this.initialAyat,
+  });
   @override
   State<SurahDetailPage> createState() => _SurahDetailPageState();
 }
@@ -41,83 +43,67 @@ class _SurahDetailPageState extends State<SurahDetailPage> {
   List<List<Map<String, dynamic>>> pages = [];
   bool isLoading = true;
   bool isFullMushaf = true;
-  Set<String> bookmarkedAyats = {};
-  double fontSize = 30;
   int currentHlm = 1;
   List<int> hlmList = [];
-  final PageController _pageController = PageController();
-  Timer? _readTimer;
-  int _secondsOnPage = 0;
+  late PageController _pageController;
 
   @override
   void initState() {
     super.initState();
-    currentHlm = surahStartPage[widget.surahNumber] ?? 1;
+    _pageController = PageController();
+    currentHlm = surahStartPage[widget.surahNumber]?? 1;
     _generateHlmList();
-    _loadBookmarks();
-    _loadOfflineInstant();
-    _startReadTimer();
+    _loadData();
   }
 
   @override
   void dispose() {
-    _readTimer?.cancel();
     _pageController.dispose();
     super.dispose();
   }
 
-  void _startReadTimer() {
-    _readTimer?.cancel();
-    _secondsOnPage = 0;
-    _readTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-      _secondsOnPage++;
-      if (_secondsOnPage >= 180) {
-        _recordHalamanDibaca();
-        _secondsOnPage = 0;
-      }
-      if (mounted) setState(() {});
-    });
-  }
-
-  Future<void> _recordHalamanDibaca() async {
-    final prefs = await SharedPreferences.getInstance();
-    final todayKey = 'ngaji_${DateTime.now().toIso8601String().split('T')[0]}';
-    await prefs.setInt(todayKey, (prefs.getInt(todayKey) ?? 0) + 1);
-  }
-
-  Future<void> _saveLastRead(int ayatNo) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('last_read', json.encode({'surahNo': widget.surahNumber, 'surahName': widget.surahName, 'ayat': ayatNo, 'hlm': currentHlm}));
-  }
-
   void _generateHlmList() {
-    final start = surahStartPage[widget.surahNumber] ?? 1;
+    final start = surahStartPage[widget.surahNumber]?? 1;
     final end = getSurahEndPage(widget.surahNumber);
     hlmList = List.generate(end - start + 1, (i) => start + i);
-    if (hlmList.length > 20) hlmList = hlmList.take(20).toList();
   }
 
-  void _loadOfflineInstant() {
-    final data = getSurahOffline(widget.surahNumber);
-    if (data != null) {
-      final list = List<Map<String, dynamic>>.from(data['ayat']);
-      setState(() { ayatList = list; _createPages(list); isLoading = false; });
-      if (widget.initialAyat != null) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToAyat(widget.initialAyat!));
-      }
+  Future<void> _loadData() async {
+    try {
+      final list = await QuranService.loadSurah(widget.surahNumber);
+      if (!mounted) return;
+      setState(() {
+        ayatList = list;
+        _createPages(list);
+        isLoading = false;
+        currentHlm = surahStartPage[widget.surahNumber]?? 1;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (pages.isNotEmpty && _pageController.hasClients) {
+          _pageController.jumpToPage(pages.length - 1);
+          if (widget.initialAyat!= null) {
+            _scrollToAyat(widget.initialAyat!);
+          }
+        }
+      });
+    } catch (e) {
+      debugPrint("GAGAL LOAD SURAH ${widget.surahNumber}: $e");
+      if (mounted) setState(() => isLoading = false);
     }
-    _syncOnlineBackground();
   }
 
   void _createPages(List<Map<String, dynamic>> allAyat) {
-    final start = surahStartPage[widget.surahNumber] ?? 1;
+    final start = surahStartPage[widget.surahNumber]?? 1;
     final end = getSurahEndPage(widget.surahNumber);
-    final total = end - start + 1;
-    if (total <= 1 || allAyat.length <= 5) { pages = [allAyat]; return; }
-    final perPage = (allAyat.length / total).ceil();
+    final totalHlm = end - start + 1;
+    if (totalHlm <= 1 || allAyat.length <= 5) {
+      pages = [allAyat];
+      return;
+    }
+    final perPage = (allAyat.length / totalHlm).ceil();
     pages = [];
     for (var i = 0; i < allAyat.length; i += perPage) {
-      final endIdx = i + perPage > allAyat.length ? allAyat.length : i + perPage;
+      final endIdx = i + perPage > allAyat.length? allAyat.length : i + perPage;
       pages.add(allAyat.sublist(i, endIdx));
     }
     if (pages.isEmpty) pages = [allAyat];
@@ -128,48 +114,15 @@ class _SurahDetailPageState extends State<SurahDetailPage> {
       if (pages[p].any((a) => a['no'] == ayatNo)) {
         final rtlIdx = pages.length - 1 - p;
         _pageController.jumpToPage(rtlIdx);
-        setState(() => currentHlm = (surahStartPage[widget.surahNumber] ?? 1) + p);
-        _saveLastRead(ayatNo);
+        setState(() => currentHlm = (surahStartPage[widget.surahNumber]?? 1) + p);
         return;
       }
     }
   }
 
-  Future<void> _syncOnlineBackground() async {
-    try {
-      final url = Uri.parse('https://api.alquran.cloud/v1/surah/${widget.surahNumber}/editions/quran-uthmani,id.indonesian');
-      final r = await http.get(url).timeout(const Duration(seconds: 8));
-      if (r.statusCode == 200) {
-        final data = json.decode(r.body)['data'];
-        final arab = data[0]['ayahs'] as List;
-        final indo = data[1]['ayahs'] as List;
-        List<Map<String, dynamic>> comb = [];
-        for (int i = 0; i < arab.length; i++) {
-          comb.add({"no": arab[i]['numberInSurah'], "arab": arab[i]['text'], "indo": indo[i]['text']});
-        }
-        if (mounted) setState(() { ayatList = comb; _createPages(comb); });
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _loadBookmarks() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() => bookmarkedAyats = (prefs.getStringList('bookmarks') ?? []).toSet());
-  }
-
-  Future<void> _toggleBookmark(int ayatNo) async {
-    final prefs = await SharedPreferences.getInstance();
-    final key = '${widget.surahNumber}:$ayatNo';
-    setState(() {
-      if (bookmarkedAyats.contains(key)) bookmarkedAyats.remove(key);
-      else bookmarkedAyats.add(key);
-    });
-    await prefs.setStringList('bookmarks', bookmarkedAyats.toList());
-  }
-
   @override
   Widget build(BuildContext context) {
-    final startPage = surahStartPage[widget.surahNumber] ?? 1;
+    final startPage = surahStartPage[widget.surahNumber]?? 1;
     return Scaffold(
       backgroundColor: const Color(0xFFFDF6E3),
       appBar: AppBar(
@@ -178,164 +131,185 @@ class _SurahDetailPageState extends State<SurahDetailPage> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('${widget.surahNumber}. ${widget.surahName}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15)),
-            Text('Hlm $currentHlm • ${isFullMushaf ? "Full Mushaf Rapat" : "Dengan Terjemahan"}', style: const TextStyle(color: Colors.white70, fontSize: 10)),
+            Text('${widget.surahNumber}. ${widget.surahName}',
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15)),
+            Text('Hlm $currentHlm • ${ayatList.length} ayat • ${isFullMushaf? "Mushaf" : "Terjemah"}',
+                style: const TextStyle(color: Colors.white70, fontSize: 10)),
           ],
         ),
         actions: [
-          IconButton(icon: Icon(isFullMushaf ? Icons.menu_book : Icons.translate, color: const Color(0xFFD4AF37)), onPressed: () => setState(() => isFullMushaf = !isFullMushaf)),
+          IconButton(
+            icon: Icon(isFullMushaf? Icons.translate : Icons.menu_book, color: const Color(0xFFD4AF37)),
+            onPressed: () => setState(() => isFullMushaf =!isFullMushaf),
+          ),
         ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(46),
           child: Container(
             height: 46,
             color: const Color(0xFF0A1F3D),
-            child: Row(
-              children: [
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ListView.builder(
-                    scrollDirection: Axis.horizontal,
-                    reverse: true,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    itemCount: hlmList.length,
-                    itemBuilder: (_, i) {
-                      final hlmNo = hlmList[i];
-                      final isActive = hlmNo == currentHlm;
-                      return InkWell(
-                        onTap: () {
-                          setState(() => currentHlm = hlmNo);
-                          final pageIdx = hlmNo - startPage;
-                          final rtlIdx = pages.length - 1 - pageIdx;
-                          if (rtlIdx >= 0 && rtlIdx < pages.length) {
-                            _pageController.animateToPage(rtlIdx, duration: const Duration(milliseconds: 300), curve: Curves.ease);
-                            _startReadTimer();
-                          }
-                        },
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 7),
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          decoration: BoxDecoration(color: isActive ? const Color(0xFFD4AF37) : Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(20)),
-                          child: Center(child: Text('Hlm. $hlmNo', style: TextStyle(color: isActive ? const Color(0xFF0D2A54) : Colors.white70, fontWeight: isActive ? FontWeight.bold : FontWeight.normal, fontSize: 13))),
-                        ),
-                      );
-                    },
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              reverse: true,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              itemCount: hlmList.length,
+              itemBuilder: (_, i) {
+                final hlmNo = hlmList[i];
+                final isActive = hlmNo == currentHlm;
+                return InkWell(
+                  onTap: () {
+                    final pageIdx = hlmNo - startPage;
+                    final rtlIdx = pages.length - 1 - pageIdx;
+                    if (rtlIdx >= 0 && rtlIdx < pages.length) {
+                      _pageController.animateToPage(rtlIdx,
+                          duration: const Duration(milliseconds: 300), curve: Curves.ease);
+                    }
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 7),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: isActive? const Color(0xFFD4AF37) : Colors.white.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Center(
+                      child: Text('Hlm $hlmNo',
+                          style: TextStyle(
+                              color: isActive? const Color(0xFF0D2A54) : Colors.white70,
+                              fontWeight: isActive? FontWeight.bold : FontWeight.normal,
+                              fontSize: 12)),
+                    ),
                   ),
-                ),
-              ],
+                );
+              },
             ),
           ),
         ),
       ),
       body: isLoading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF0D2A54)))
-          : Column(
-              children: [
-                LinearProgressIndicator(value: _secondsOnPage / 180, backgroundColor: Colors.grey.shade200, valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFD4AF37))),
-                Expanded(
-                  child: PageView.builder(
-                    controller: _pageController,
-                    reverse: true,
-                    onPageChanged: (rtlIdx) {
-                      final actualIdx = pages.length - 1 - rtlIdx;
-                      setState(() => currentHlm = startPage + actualIdx);
-                      _startReadTimer();
-                      if (pages.isNotEmpty && actualIdx >= 0 && actualIdx < pages.length) {
-                        _saveLastRead(pages[actualIdx].first['no']);
-                      }
-                    },
-                    itemCount: pages.length,
-                    itemBuilder: (_, rtlIdx) {
-                      final actualIdx = pages.length - 1 - rtlIdx;
-                      if (actualIdx < 0 || actualIdx >= pages.length) return const SizedBox();
-                      final pageAyats = pages[actualIdx];
-                      if (isFullMushaf) {
-                        return SingleChildScrollView(
-                          padding: const EdgeInsets.all(6),
-                          child: Container(
-                            decoration: BoxDecoration(color: const Color(0xFFFFFEF7), border: Border.all(color: const Color(0xFF2E7D32).withOpacity(0.25), width: 1.2)),
-                            child: Column(
-                              children: [
-                                Container(
-                                  width: double.infinity,
-                                  padding: const EdgeInsets.symmetric(vertical: 8),
-                                  decoration: BoxDecoration(color: const Color(0xFFF1F8E9), border: Border(bottom: BorderSide(color: const Color(0xFF2E7D32).withOpacity(0.2)))),
-                                  child: Column(
-                                    children: [
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-                                        decoration: BoxDecoration(border: Border.all(color: const Color(0xFF2E7D32), width: 1)),
-                                        child: Text('سُوْرَةُ ${widget.surahArab}', style: GoogleFonts.amiriQuran(fontSize: 14, fontWeight: FontWeight.bold)),
-                                      ),
-                                      if (widget.surahNumber != 1 && widget.surahNumber != 9 && actualIdx == 0)
-                                        Padding(padding: const EdgeInsets.only(top: 6), child: Text('بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ', style: GoogleFonts.amiriQuran(fontSize: 16))),
-                                    ],
-                                  ),
+         ? const Center(child: CircularProgressIndicator(color: Color(0xFF0D2A54)))
+          : PageView.builder(
+              controller: _pageController,
+              reverse: true,
+              onPageChanged: (rtlIdx) {
+                final actualIdx = pages.length - 1 - rtlIdx;
+                setState(() => currentHlm = startPage + actualIdx);
+              },
+              itemCount: pages.length,
+              itemBuilder: (context, rtlIdx) {
+                final actualIdx = pages.length - 1 - rtlIdx;
+                if (actualIdx < 0 || actualIdx >= pages.length) return const SizedBox();
+                final pageAyats = pages[actualIdx];
+                if (isFullMushaf) {
+                  return SingleChildScrollView(
+                    padding: const EdgeInsets.all(8),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFFEF7),
+                        border: Border.all(color: const Color(0xFF2E7D32).withOpacity(0.25), width: 1.2),
+                      ),
+                      child: Text.rich(
+                        TextSpan(
+                          children: [
+                            if (actualIdx == 0 && widget.surahNumber!= 1 && widget.surahNumber!= 9)
+                              TextSpan(
+                                  text: "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ\n\n",
+                                  style: GoogleFonts.scheherazadeNew(fontSize: 20, fontWeight: FontWeight.bold)),
+                            for (var ayat in pageAyats)...[
+                              TextSpan(
+                                text: "${ayat['arab']} ",
+                                style: GoogleFonts.scheherazadeNew(fontSize: 24, height: 2.2),
+                              ),
+                              WidgetSpan(
+                                child: Container(
+                                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                                  padding: const EdgeInsets.all(2),
+                                  decoration: BoxDecoration(
+                                      border: Border.all(color: const Color(0xFF2E7D32)), shape: BoxShape.circle),
+                                  child: Text('${ayat['no']}',
+                                      style: const TextStyle(fontSize: 9, color: Color(0xFF2E7D32), fontWeight: FontWeight.bold)),
                                 ),
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-                                  child: Text.rich(
-                                    TextSpan(
-                                      children: [
-                                        for (var ayat in pageAyats) ...[
-                                          TextSpan(text: '${ayat['arab']} ', style: GoogleFonts.amiriQuran(fontSize: fontSize - 1, height: 2.3, color: const Color(0xFF1A1A1A))),
-                                          WidgetSpan(
-                                            alignment: PlaceholderAlignment.middle,
-                                            child: Container(
-                                              margin: const EdgeInsets.symmetric(horizontal: 3),
-                                              padding: const EdgeInsets.all(2),
-                                              decoration: BoxDecoration(border: Border.all(color: const Color(0xFF2E7D32), width: 1), shape: BoxShape.circle),
-                                              child: Text('${ayat['no']}', style: const TextStyle(fontSize: 9, color: Color(0xFF2E7D32), fontWeight: FontWeight.bold)),
-                                            ),
-                                          ),
-                                          const TextSpan(text: ' '),
-                                        ]
-                                      ],
-                                    ),
-                                    textAlign: TextAlign.justify,
-                                    textDirection: TextDirection.rtl,
-                                  ),
-                                ),
-                              ],
+                              ),
+                              const TextSpan(text: " "),
+                            ]
+                          ],
+                        ),
+                        textAlign: TextAlign.justify,
+                        textDirection: TextDirection.rtl,
+                      ),
+                    ),
+                  );
+                }
+                // MODE 2: 1 AYAT 1 TERJEMAHAN - FIX NOMOR AYAT MUNCUL
+            return ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: pageAyats.length,
+              itemBuilder: (_, i) {
+                final ayat = pageAyats[i];
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.3))),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // ARAB + NOMOR AYAT DI UJUNG
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              ayat['arab']?? '',
+                              textAlign: TextAlign.right,
+                              style: GoogleFonts.scheherazadeNew(
+                                fontSize: 26,
+                                height: 1.8,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
-                        );
-                      }
-                      return SingleChildScrollView(
-                        padding: const EdgeInsets.all(12),
-                        child: Container(
-                          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.3))),
-                          padding: const EdgeInsets.all(14),
-                          child: Column(
-                            children: pageAyats.map((ayat) {
-                              return Container(
-                                margin: const EdgeInsets.only(bottom: 12),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                                  children: [
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2), decoration: BoxDecoration(color: const Color(0xFF0D2A54), borderRadius: BorderRadius.circular(12)), child: Text('${ayat['no']}', style: const TextStyle(color: Color(0xFFD4AF37), fontSize: 11, fontWeight: FontWeight.bold))),
-                                        InkWell(onTap: () => _toggleBookmark(ayat['no']), child: Icon(bookmarkedAyats.contains('${widget.surahNumber}:${ayat['no']}') ? Icons.bookmark : Icons.bookmark_border, size: 18, color: const Color(0xFFD4AF37))),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 6),
-                                    Text(ayat['arab'] ?? '', textAlign: TextAlign.right, style: GoogleFonts.amiriQuran(fontSize: 28, height: 1.8)),
-                                    const SizedBox(height: 6),
-                                    Text(ayat['indo'] ?? '', style: GoogleFonts.inter(fontSize: 12, color: Colors.grey.shade700)),
-                                  ],
-                                ),
-                              );
-                            }).toList(),
+                          const SizedBox(width: 8),
+                          // NOMOR AYAT BULAT HIJAU
+                          Container(
+                            margin: const EdgeInsets.only(top: 4),
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              border: Border.all(color: const Color(0xFF2E7D32), width: 1.2),
+                              shape: BoxShape.circle,
+                              color: const Color(0xFFF1F8E9),
+                            ),
+                            child: Text(
+                              '${ayat['no']}',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF2E7D32),
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
-                        ),
-                      );
-                    },
+                        ],
+                      ),
+                      const Divider(height: 20),
+                      // TERJEMAH
+                      Text(
+                        ayat['indo']?? '',
+                        style: GoogleFonts.inter(fontSize: 14, height: 1.6, color: Colors.black87),
+                      ),
+                      const SizedBox(height: 6),
+                      Text('QS ${widget.surahNumber}:${ayat['no']} • Hlm $currentHlm',
+                          style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                    ],
                   ),
-                ),
-              ],
+                );
+              },
+            );
+              },
             ),
     );
+    
   }
 }

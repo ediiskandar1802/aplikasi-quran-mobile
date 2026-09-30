@@ -93,6 +93,7 @@ flutter:
   assets:
     - assets/logo.png
     - assets/icons/
+    - assets/data/surah/
 flutter_native_splash:
   color: "#0D4A42"
   image: assets/logo.png
